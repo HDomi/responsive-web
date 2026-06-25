@@ -1,6 +1,6 @@
 <template>
   <div 
-    class="view-card flex flex-col h-full overflow-hidden"
+    class="view-card flex flex-col h-full overflow-hidden relative"
     :class="{ 'active-card': isActive }"
     @click="$emit('select', view.id)"
   >
@@ -107,6 +107,11 @@
       
       <!-- 실제 웹 화면 렌더링용 웹뷰 프레임 -->
       <div :id="`webview-outer-${view.id}`" class="webview-checkered-bg relative">
+        <!-- 드래그 리사이즈 시 웹뷰가 마우스 이벤트를 가로채지 못하도록 덮는 투명 방어막 -->
+        <div 
+          v-if="isResizing" 
+          class="absolute inset-0 z-40 bg-transparent"
+        ></div>
         <!-- Fit 크기 비례 스케일링용 래퍼 컨테이너 -->
         <div 
           class="webview-scale-wrapper" 
@@ -143,10 +148,16 @@
         </div>
       </div>
     </div>
+    <!-- 실시간 크기 조절을 위한 드래그 핸들 (우측, 하단, 대각선 모서리) -->
+    <div class="resize-handle-r" @mousedown.stop.prevent="initResize($event, 'r')"></div>
+    <div class="resize-handle-b" @mousedown.stop.prevent="initResize($event, 'b')"></div>
+    <div class="resize-handle-se" @mousedown.stop.prevent="initResize($event, 'se')"></div>
   </div>
 </template>
 
 <script setup>
+import { ref } from 'vue';
+
 // Props와 Emit 이벤트 선언
 const props = defineProps({
   view: {
@@ -159,7 +170,7 @@ const props = defineProps({
   }
 });
 
-defineEmits([
+const emit = defineEmits([
   'select',
   'remove',
   'go-back',
@@ -168,8 +179,62 @@ defineEmits([
   'open-devtools',
   'navigate',
   'preset-change',
-  'dimension-input'
+  'dimension-input',
+  'manual-resize'
 ]);
+
+// 리사이즈 드래그 조작 상태값
+const isResizing = ref(false);
+
+// 마우스 드래그를 이용한 실시간 크기 조절 이벤트 핸들러
+const initResize = (e, direction) => {
+  isResizing.value = true;
+  
+  // 기준이 되는 가장 가까운 카드 DOM 엘리먼트 획득
+  const el = e.currentTarget.closest('.view-card');
+  const startWidth = el.offsetWidth;
+  const startHeight = el.offsetHeight;
+  const startX = e.clientX;
+  const startY = e.clientY;
+  
+  // 마우스 이동 시 실시간 크기 변위량 반영
+  const doDrag = (moveEvent) => {
+    const deltaX = moveEvent.clientX - startX;
+    const deltaY = moveEvent.clientY - startY;
+    
+    let newWidth = startWidth;
+    let newHeight = startHeight;
+    
+    if (direction === 'r' || direction === 'se') {
+      newWidth = Math.max(320, startWidth + deltaX);
+    }
+    if (direction === 'b' || direction === 'se') {
+      newHeight = Math.max(250, startHeight + deltaY);
+    }
+    
+    emit('manual-resize', {
+      id: props.view.id,
+      width: newWidth,
+      height: newHeight
+    });
+  };
+  
+  // 드래그 종료 시 이벤트 해제 및 복구
+  const stopDrag = () => {
+    isResizing.value = false;
+    document.removeEventListener('mousemove', doDrag);
+    document.removeEventListener('mouseup', stopDrag);
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+  };
+  
+  // 드래그 중인 커서 스타일 고정 및 글자 선택 방지
+  document.body.style.cursor = direction === 'r' ? 'e-resize' : (direction === 'b' ? 's-resize' : 'se-resize');
+  document.body.style.userSelect = 'none';
+  
+  document.addEventListener('mousemove', doDrag);
+  document.addEventListener('mouseup', stopDrag);
+};
 </script>
 
 <style scoped lang="scss">
@@ -190,6 +255,53 @@ defineEmits([
     background: rgba(255, 255, 255, 0.08);
     border-color: #8b5cf6;
     box-shadow: 0 0 8px rgba(139, 92, 246, 0.25);
+  }
+}
+
+// 마우스 드래그 크기 조절 핸들 바/모서리 디자인
+.resize-handle-r {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 6px;
+  height: 100%;
+  cursor: e-resize;
+  z-index: 50;
+  transition: background-color 0.2s ease;
+  
+  &:hover, &:active {
+    background-color: rgba(139, 92, 246, 0.4); // 마우스 호버/조작 시 보라색 가이드 라인 점등
+  }
+}
+
+.resize-handle-b {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  width: 100%;
+  height: 6px;
+  cursor: s-resize;
+  z-index: 50;
+  transition: background-color 0.2s ease;
+  
+  &:hover, &:active {
+    background-color: rgba(139, 92, 246, 0.4); // 마우스 호버/조작 시 보라색 가이드 라인 점등
+  }
+}
+
+.resize-handle-se {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 12px;
+  height: 12px;
+  cursor: se-resize;
+  z-index: 51;
+  transition: background-color 0.2s ease;
+  clip-path: polygon(100% 0, 0 100%, 100% 100%); // 하단 모서리 삼각형 핸들링 피드백
+  
+  &:hover, &:active {
+    background-color: rgba(139, 92, 246, 0.75); // 모퉁이는 조금 더 강하게 강조
   }
 }
 </style>

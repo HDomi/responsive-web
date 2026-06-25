@@ -74,124 +74,30 @@
       <span>상단 토글바에서 패널을 추가해 주세요. (웹 또는 모바일)</span>
     </div>
 
-    <!-- 활성화된 패널 레이아웃 컨테이너 -->
-    <div v-else id="inspect-container" class="flex-1 w-full h-full relative overflow-hidden bg-[#09090f]">
-      
-      <!-- 1. Web 뷰 전용 레이아웃: 2열 세로 그리드뷰 -->
-      <div 
-        v-if="layoutType === 'web-only'" 
-        class="w-full h-full grid gap-2 p-2 overflow-y-auto"
-        :class="activeViews.length === 1 ? 'grid-cols-1' : 'grid-cols-2'"
-      >
-        <ViewPanel
-          v-for="view in activeViews"
-          :key="view.id"
-          :view="view"
-          :isActive="activeView === view.id"
-          @select="activeView = $event"
-          @remove="removeView"
-          @go-back="goBack"
-          @go-forward="goForward"
-          @reload="reload"
-          @open-devtools="openDevTools"
-          @navigate="navigate"
-          @preset-change="onPresetChange"
-          @dimension-input="onDimensionInput"
-        />
-      </div>
-
-      <!-- 2. Mobile 뷰 전용 레이아웃: 가로 스크롤형 나열식 뷰 -->
-      <div 
-        v-else-if="layoutType === 'mobile-only'" 
-        class="w-full h-full flex flex-row gap-2 p-2 overflow-x-auto items-stretch"
-      >
-        <ViewPanel
-          v-for="view in activeViews"
-          :key="view.id"
-          :view="view"
-          :isActive="activeView === view.id"
-          :style="{ width: '420px' }"
-          class="shrink-0"
-          @select="activeView = $event"
-          @remove="removeView"
-          @go-back="goBack"
-          @go-forward="goForward"
-          @reload="reload"
-          @open-devtools="openDevTools"
-          @navigate="navigate"
-          @preset-change="onPresetChange"
-          @dimension-input="onDimensionInput"
-        />
-      </div>
-
-      <!-- 3. Web + Mobile 혼합 레이아웃: 왼쪽 Web 50% 고정, 오른쪽 Mobile N개 가로 스크롤 나열 50% -->
-      <div 
-        v-else-if="layoutType === 'mixed-split'" 
-        class="w-full h-full flex flex-row overflow-hidden"
-      >
-        <!-- 좌측 Web 고정 영역 -->
-        <div class="h-full border-r border-white/5 flex flex-col" :style="{ width: '50%', minWidth: '400px' }">
-          <ViewPanel
-            v-for="view in activeViews.filter(v => v.type === 'web')"
-            :key="view.id"
-            :view="view"
-            :isActive="activeView === view.id"
-            @select="activeView = $event"
-            @remove="removeView"
-            @go-back="goBack"
-            @go-forward="goForward"
-            @reload="reload"
-            @open-devtools="openDevTools"
-            @navigate="navigate"
-            @preset-change="onPresetChange"
-            @dimension-input="onDimensionInput"
-          />
-        </div>
-        <!-- 우측 Mobile 가로 스크롤 영역 -->
-        <div class="flex-1 h-full flex flex-row gap-2 p-2 overflow-x-auto items-stretch bg-[#0c0c16]">
-          <ViewPanel
-            v-for="view in activeViews.filter(v => v.type === 'mobile')"
-            :key="view.id"
-            :view="view"
-            :isActive="activeView === view.id"
-            :style="{ width: '400px' }"
-            class="shrink-0"
-            @select="activeView = $event"
-            @remove="removeView"
-            @go-back="goBack"
-            @go-forward="goForward"
-            @reload="reload"
-            @open-devtools="openDevTools"
-            @navigate="navigate"
-            @preset-change="onPresetChange"
-            @dimension-input="onDimensionInput"
-          />
-        </div>
-      </div>
-
-      <!-- 4. 일반 혼합 뷰포트 레이아웃: 반응형 Flex Wrap 카드 자동 배치 -->
-      <div 
-        v-else 
-        class="w-full h-full flex flex-wrap gap-2 p-2 overflow-y-auto items-start justify-start"
-      >
-        <ViewPanel
-          v-for="view in activeViews"
-          :key="view.id"
-          :view="view"
-          :isActive="activeView === view.id"
-          :style="{ width: view.type === 'web' ? 'calc(50% - 8px)' : '390px', height: '650px' }"
-          @select="activeView = $event"
-          @remove="removeView"
-          @go-back="goBack"
-          @go-forward="goForward"
-          @reload="reload"
-          @open-devtools="openDevTools"
-          @navigate="navigate"
-          @preset-change="onPresetChange"
-          @dimension-input="onDimensionInput"
-        />
-      </div>
-
+    <!-- 활성화된 패널 레이아웃 컨테이너 (레이아웃에 무관하게 webview DOM 파괴 방지를 위해 단일 Flat Container 유지) -->
+    <div 
+      v-else 
+      id="inspect-container" 
+      class="flex-1 w-full h-full overflow-auto bg-[#09090f]"
+      :class="layoutContainerClass"
+    >
+      <ViewPanel
+        v-for="view in activeViews"
+        :key="view.id"
+        :view="view"
+        :isActive="activeView === view.id"
+        :style="getViewCardStyle(view)"
+        @select="activeView = $event"
+        @remove="removeView"
+        @go-back="goBack"
+        @go-forward="goForward"
+        @reload="reload"
+        @open-devtools="openDevTools"
+        @navigate="navigate"
+        @preset-change="onPresetChange"
+        @dimension-input="onDimensionInput"
+        @manual-resize="onManualResize"
+      />
     </div>
   </div>
 </template>
@@ -232,8 +138,11 @@ const createNewViewObj = (type, initialUrl = 'https://www.google.com') => {
     userAgent: isWeb 
       ? 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
       : 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/122.0.0.0 Mobile/15E148 Safari/604.1',
-    // 세션 파티션 격리: appLaunchId 기반으로 완전 무결한 매 실행 독립 세션 확보
-    partition: `persist:session-${appLaunchId}-${id}`,
+    // 세션 파티션 격리: 고정된 ID 기반으로 핫 리로드 및 앱 재구동 시에도 완벽한 세션 유지
+    partition: `persist:session-${id}`,
+    // 사용자가 직접 드래그해서 지정한 카드 물리적 크기 값 (초기에는 undefined)
+    cardWidth: undefined,
+    cardHeight: undefined,
     presets: isWeb ? [
       { name: '컨테이너 맞춤 (기본값)', value: 'fill', w: 1000, h: 800 },
       { name: 'Full HD (1920×1080)', value: '1920x1080', w: 1920, h: 1080 },
@@ -285,6 +194,89 @@ const layoutType = computed(() => {
   if (webs.length === 1 && mobiles.length >= 1) return 'mixed-split';
   return 'default-wrap';
 });
+
+// 레이아웃 분류에 따른 단일 부모 컨테이너의 반응형 CSS 스타일 지정
+const layoutContainerClass = computed(() => {
+  const layout = layoutType.value;
+  switch (layout) {
+    case 'web-only':
+      return 'flex flex-wrap gap-3 p-3 items-start justify-start';
+    case 'mobile-only':
+      return 'flex flex-row gap-3 p-3 items-stretch';
+    case 'mixed-split':
+      return 'flex flex-row gap-3 p-3 items-stretch';
+    case 'default-wrap':
+    default:
+      return 'flex flex-wrap gap-3 p-3 items-start justify-start';
+  }
+});
+
+// 개별 패널(윈도우) 카드의 스타일을 드래그 상태와 레이아웃 규칙에 맞춰 동적 반환
+const getViewCardStyle = (view) => {
+  const styles = {};
+  const layout = layoutType.value;
+  
+  // Visual Order 제어: mixed-split 모드 시 웹뷰(order: 1)가 모바일뷰(order: 2)보다 항상 시각적으로 먼저 왼쪽에 오도록 설정
+  // 이 방식은 DOM의 물리적 순서 정렬(Sort)로 인한 Electron 웹뷰 인스턴스 재생성 및 세션 끊김 현상을 완벽히 방지합니다.
+  if (layout === 'mixed-split') {
+    styles.order = view.type === 'web' ? 1 : 2;
+  } else {
+    styles.order = 0;
+  }
+  
+  // 1. 가로 너비(width) 설정
+  if (view.cardWidth) {
+    styles.width = `${view.cardWidth}px`;
+  } else {
+    if (view.type === 'web') {
+      if (layout === 'web-only') {
+        styles.width = activeViews.value.length === 1 ? 'calc(100% - 8px)' : 'calc(50% - 12px)';
+      } else if (layout === 'mixed-split') {
+        styles.width = 'calc(50% - 12px)';
+      } else {
+        styles.width = 'calc(50% - 12px)';
+      }
+    } else {
+      styles.width = '390px'; // 모바일 패널 기본 폭
+    }
+  }
+  
+  // 2. 세로 높이(height) 설정
+  if (view.cardHeight) {
+    styles.height = `${view.cardHeight}px`;
+  } else {
+    if (layout === 'mobile-only' || layout === 'mixed-split') {
+      styles.height = '100%'; // 가로 스크롤 레이아웃에선 부모 높이에 고정
+    } else {
+      styles.height = '650px'; // 기본 높이 설정
+    }
+  }
+  
+  // 3. mixed-split 모드 시 좌측 웹 고정 스티키(Sticky) 배치 및 그림자 효과 추가
+  if (layout === 'mixed-split' && view.type === 'web') {
+    styles.position = 'sticky';
+    styles.left = '0';
+    styles.zIndex = '10';
+    styles.backgroundColor = '#09090f'; // 뒷배경 덮음
+    styles.borderRight = '2px solid rgba(139, 92, 246, 0.2)'; // 힌트 경계선
+    styles.boxShadow = '8px 0 20px -8px rgba(0, 0, 0, 0.6)'; // 스크롤 경계부 입체 그림자
+    
+    // 수동 크기 미지정 시에도 스티키 영역 가로폭 확보
+    if (!view.cardWidth) {
+      styles.width = 'calc(50% - 12px)';
+      styles.minWidth = '450px';
+    }
+  }
+  
+  // 가로 스크롤 흐름 시 카드 폭 찌그러짐 방지
+  if (layout === 'mobile-only' || layout === 'mixed-split') {
+    styles.flexShrink = '0';
+  } else {
+    styles.flexShrink = '0';
+  }
+  
+  return styles;
+};
 
 // 입력 주소 문자열 검증 및 프로토콜 규격 포맷팅
 const formatUrl = (url) => {
@@ -371,19 +363,38 @@ const calculateScale = (id) => {
   if (!view) return;
   
   const outerEl = document.getElementById(`webview-outer-${id}`);
-  if (!outerEl || outerEl.clientWidth === 0 || outerEl.clientHeight === 0) return;
   
-  const availWidth = outerEl.clientWidth;
-  const availHeight = outerEl.clientHeight;
+  // scaleToFit이 활성화되어 있지 않고 프리셋이 fill이 아닌 경우, 카드의 물리 크기가 내부 해상도 규격을 그대로 따라감
+  if (!view.scaleToFit && view.preset !== 'fill') {
+    view.cardWidth = view.width + 2;
+    view.cardHeight = view.height + 76;
+  }
+  
+  // 기본적으로 DOM 크기를 참조하되, cardWidth/cardHeight가 있으면 드래그 상태를 우선적으로 산출
+  let availWidth = outerEl ? outerEl.clientWidth : 0;
+  let availHeight = outerEl ? outerEl.clientHeight : 0;
+  
+  if (view.cardWidth) {
+    availWidth = view.cardWidth - 2; // 카드 좌우 보더 두께 감안
+  }
+  if (view.cardHeight) {
+    availHeight = view.cardHeight - 76; // 2줄 헤더 컨트롤러 높이 감안
+  }
+  
+  // 초기 로딩 전 예외 상황을 위한 안전 방어 코드
+  if (availWidth <= 0) availWidth = view.type === 'web' ? 800 : 390;
+  if (availHeight <= 0) availHeight = view.type === 'web' ? 600 : 750;
   
   if (view.preset === 'fill') {
-    view.width = Math.max(300, availWidth);
-    view.height = Math.max(200, availHeight);
+    // Fill 모드: 내부 해상도 수치가 외경 크기와 동일해져 실시간 반응형 처리
+    view.width = Math.max(300, Math.round(availWidth));
+    view.height = Math.max(200, Math.round(availHeight));
     view.scale = 1.0;
   } else if (view.scaleToFit) {
+    // Fit 모드: 해상도를 유지한 채 배율 스케일을 가용 공간에 맞게 자동 확대/축소
     const scaleX = availWidth / view.width;
     const scaleY = availHeight / view.height;
-    view.scale = Math.min(scaleX, scaleY, 1.0);
+    view.scale = Math.min(scaleX, scaleY);
   } else {
     view.scale = 1.0;
   }
@@ -396,6 +407,22 @@ const updateAllScales = () => {
   });
 };
 
+// 수동 드래그 크기 변경 수신 시 물리 카드 수치 반영 및 비례 연산 리프레시
+const onManualResize = ({ id, width, height }) => {
+  const view = activeViews.value.find(v => v.id === id);
+  if (!view) return;
+  
+  view.cardWidth = width;
+  view.cardHeight = height;
+  
+  // 컨테이너 맞춤(fill) 모드인 경우 프리셋을 유지하여 반응형 해상도 갱신 보장
+  if (view.preset !== 'fill') {
+    view.preset = 'custom';
+  }
+  
+  calculateScale(id);
+};
+
 // 디바이스 프리셋 선택 변경 감지 및 비율 갱신
 const onPresetChange = (id) => {
   const view = activeViews.value.find(v => v.id === id);
@@ -405,6 +432,13 @@ const onPresetChange = (id) => {
   if (matched) {
     view.width = matched.w;
     view.height = matched.h;
+    
+    // Fit 기능이 비활성화 상태에서 해상도를 바꾸면 윈도우 크기도 같이 맞춰줌
+    if (!view.scaleToFit && view.preset !== 'fill') {
+      view.cardWidth = matched.w + 2;
+      view.cardHeight = matched.h + 76;
+    }
+    
     nextTick(() => {
       calculateScale(id);
     });
@@ -416,6 +450,13 @@ const onDimensionInput = (id) => {
   const view = activeViews.value.find(v => v.id === id);
   if (view) {
     view.preset = 'custom';
+    
+    // Fit 기능이 비활성화 상태에서 값을 입력하면 윈도우 크기도 같이 맞춤
+    if (!view.scaleToFit) {
+      view.cardWidth = view.width + 2;
+      view.cardHeight = view.height + 76;
+    }
+    
     nextTick(() => {
       calculateScale(id);
     });

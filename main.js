@@ -4,7 +4,6 @@ import { fileURLToPath } from 'url';
 
 // SameSite 및 Secure 쿠키 정책을 완화하여 로컬 환경 웹뷰 내의 쿠키 누락 방지
 app.commandLine.appendSwitch('disable-features', 'SameSiteByDefaultCookies,CookiesWithoutSameSiteMustBeSecure');
-app.commandLine.appendSwitch('disable-web-security');
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -27,7 +26,7 @@ function createWindow() {
       nodeIntegration: false,
       contextIsolation: true,
       webviewTag: true, // Nuxt 내에서 <webview> 태그를 사용하기 위해 필수 활성화
-      webSecurity: false,
+      webSecurity: true, // 보안 무결성 및 로그인 세션 신뢰 확보를 위해 웹 보안 활성화
     },
   });
 
@@ -100,9 +99,17 @@ function bindPopupAndCookieHandler(contents) {
             return hostname;
           };
           
-          isInternal = getRootDomain(targetUrl.hostname) === getRootDomain(currentUrl.hostname) ||
+          // 소셜 로그인을 개시하는 내부 API 엔드포인트 패턴 감지 (/auth/, /oauth, /google 등)
+          const isOAuthPath = targetUrl.pathname.includes('/auth/') || 
+                              targetUrl.pathname.includes('/oauth') ||
+                              targetUrl.pathname.includes('/login/oauth') ||
+                              targetUrl.pathname.includes('/signin/oauth') ||
+                              targetUrl.pathname.includes('/google'); // 구글 로그인 API 매칭 추가
+          
+          // 동일 도메인이더라도 OAuth 인증 경로인 경우 부모 창 이동을 막아 팝업 창으로 안전하게 분리되도록 함
+          isInternal = (getRootDomain(targetUrl.hostname) === getRootDomain(currentUrl.hostname) ||
                        targetUrl.hostname === 'localhost' ||
-                       targetUrl.hostname === '127.0.0.1';
+                       targetUrl.hostname === '127.0.0.1') && !isOAuthPath;
         } else {
           isInternal = targetUrl.hostname === 'localhost' || targetUrl.hostname === '127.0.0.1';
         }
@@ -137,7 +144,8 @@ function bindPopupAndCookieHandler(contents) {
       webPreferences: {
         nodeIntegration: false,
         contextIsolation: true,
-        session: parentSession // 부모 웹뷰 세션 인스턴스를 직접 복사 및 공유 상속
+        session: parentSession, // 부모 웹뷰 세션 인스턴스를 직접 복사 및 공유 상속
+        webSecurity: true // 구글 로그인 등의 보안 브라우저 검증 통과를 위해 반드시 true 설정
       }
     });
 
@@ -152,8 +160,8 @@ function bindPopupAndCookieHandler(contents) {
       popupWin.webContents.setUserAgent(app.userAgentFallback);
     }
 
-    // 팝업 주소 로드
-    popupWin.loadURL(details.url);
+    // 팝업 주소 로드 시 명시적으로 최신 데스크톱 User-Agent를 넘겨 첫 HTTP 요청의 신뢰성 보장
+    popupWin.loadURL(details.url, { userAgent: app.userAgentFallback });
 
     // 로그인 완료 감지 및 성공 시 쿠키 공유를 위한 내비게이션 리디렉션 감시 리스너
     const handleNavigation = async (targetUrl) => {
@@ -279,8 +287,7 @@ const activeSessions = new Set();
 
 // 세션 단위 SameSite/Secure 쿠키 규약 우회 및 동메인 공유 강제 설정 + 디버그 리스너 바인딩
 function bindCookieMutatorToSession(sess) {
-  if (!sess || activeSessions.has(sess)) return;
-  activeSessions.add(sess);
+  if (!sess) return;
   
   console.log(`[Main Process] [Session Init] Binding cookie mutator and debugger to session: ${sess.getStoragePath() || 'memory-session'}`);
 
@@ -288,6 +295,12 @@ function bindCookieMutatorToSession(sess) {
   if (app.userAgentFallback) {
     sess.setUserAgent(app.userAgentFallback);
   }
+
+  // 구글 로그인 보안 블락 이중 우회: accounts.google.com으로 전송되는 모든 HTTP 요청 헤더의 User-Agent를 강제로 데스크톱 크롬으로 변조
+  sess.webRequest.onBeforeSendHeaders({ urls: ['https://accounts.google.com/*'] }, (details, callback) => {
+    details.requestHeaders['User-Agent'] = app.userAgentFallback;
+    callback({ requestHeaders: details.requestHeaders });
+  });
 
   // SameSite/Secure 규약 우회 헤더 인터셉터
   sess.webRequest.onHeadersReceived((details, callback) => {
@@ -361,7 +374,7 @@ app.on('web-contents-created', (event, contents) => {
     
     // 쿠키 정상 공유 및 로그인 표준 팝업 허용 스위치
     webPreferences.allowPopups = true;
-    webPreferences.webSecurity = false; // 웹 보안을 완화하여 크로스 도메인 API 쿠키 전파 수용
+    webPreferences.webSecurity = true; // 보안 무결성 및 정상적인 소셜 로그인 통과를 위해 웹 보안 활성화
   });
 
   // 생성 완료 직후 팝업 제어기 및 세션 정책 핸들러 연결

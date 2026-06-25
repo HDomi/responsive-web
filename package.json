@@ -2,6 +2,9 @@
   "name": "responsive-web",
   "type": "module",
   "private": true,
+  "version": "1.0.0",
+  "description": "Multi-view responsive developer browser",
+  "author": "Domi",
   "main": "main.js",
   "scripts": {
     "build": "nuxt generate",
@@ -32,6 +35,7 @@
     "productName": "Domi Inspector",
     "mac": {
       "category": "public.app-category.developer-tools",
+      "icon": "public/icon.png",
       "target": [
         "dmg",
         "zip"
@@ -39,7 +43,9 @@
     },
     "files": [
       "main.js",
-      ".output/public/**/*"
+      "package.json",
+      ".output/public/**/*",
+      "public/**/*"
     ],
     "directories": {
       "output": "dist"

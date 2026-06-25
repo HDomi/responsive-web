@@ -1,5 +1,9 @@
 <template>
-  <div class="h-screen w-screen flex flex-col overflow-hidden bg-[#09090f] text-[#f3f4f6]">
+  <!-- 소켓 모니터 대시보드 모드 (해시 라우팅으로 진입 시 전용 UI 렌더링) -->
+  <SocketMonitorDashboard v-if="isSocketMonitorMode" />
+
+  <!-- 메인 브라우저 모드 -->
+  <div v-else class="h-screen w-screen flex flex-col overflow-hidden bg-[#09090f] text-[#f3f4f6]">
     <!-- 상단 공통 헤더 바 -->
     <header class="glass-header h-14 flex items-center justify-between px-6 z-50 shrink-0 gap-4">
       <!-- 글로벌 주소 입력창 및 패널 추가 조작부 -->
@@ -53,6 +57,14 @@
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 1121.21 8H17" />
           </svg>
         </button>
+        <!-- 소켓 모니터 대시보드 팝업 열기 버튼 -->
+        <button 
+          @click="openSocketMonitor" 
+          title="실시간 소켓 모니터 대시보드"
+          class="h-9 px-3 rounded-lg bg-emerald-950/30 border border-emerald-500/20 hover:bg-emerald-500/15 transition-all flex items-center justify-center gap-1.5 text-emerald-400 hover:text-emerald-300 text-xs font-bold"
+        >
+          🔌 소켓
+        </button>
       </div>
 
       <!-- 시스템 환경 인포그래픽 -->
@@ -97,6 +109,7 @@
         @preset-change="onPresetChange"
         @dimension-input="onDimensionInput"
         @manual-resize="onManualResize"
+        @ipc-message="onWebviewIpcMessage"
       />
     </div>
   </div>
@@ -117,6 +130,30 @@ const activeViews = ref([]);
 // 세션 격리 식별용 고유 키 생성 (실행 타임스탬프)
 const appLaunchId = Date.now();
 let viewCounter = 1;
+
+// 소켓 모니터 모드 여부 (해시 라우팅으로 판별, onMounted에서 초기화)
+const isSocketMonitorMode = ref(false);
+
+// BroadcastChannel 인스턴스 (메인 윈도우 → 모니터 팝업 소켓 데이터 릴레이용)
+let socketBroadcastChannel = null;
+
+// 소켓 모니터 대시보드 팝업 열기
+const openSocketMonitor = () => {
+  window.open('/#socket-monitor', '_blank');
+};
+
+// 웹뷰에서 수신된 IPC 메시지를 BroadcastChannel로 포워딩하여 모니터 창에서 실시간 수신 가능하게 함
+const onWebviewIpcMessage = ({ channel, args, viewId, viewType }) => {
+  if (!socketBroadcastChannel) return;
+  
+  // 소켓 관련 채널만 필터링하여 릴레이
+  if (['socket-connected', 'socket-message', 'socket-closed'].includes(channel)) {
+    socketBroadcastChannel.postMessage({
+      channel,
+      data: { ...args, viewId, viewType }
+    });
+  }
+};
 
 // 새로운 패널 데이터 객체를 규격에 맞춰 초기화하는 헬퍼 함수
 const createNewViewObj = (type, initialUrl = 'https://www.google.com') => {
@@ -501,6 +538,15 @@ const bindWebviewEvents = (id) => {
 let resizeObserver = null;
 
 onMounted(() => {
+  // 해시 라우팅으로 소켓 모니터 모드 진입 여부 판별
+  isSocketMonitorMode.value = window.location.hash === '#socket-monitor';
+  
+  // 소켓 모니터 모드에서는 메인 브라우저 초기화를 건너뜀 (대시보드 컴포넌트가 자체 초기화 수행)
+  if (isSocketMonitorMode.value) return;
+  
+  // 메인 브라우저 모드에서만 BroadcastChannel 릴레이어 생성 (소켓 데이터를 모니터 팝업으로 전송)
+  socketBroadcastChannel = new BroadcastChannel('domi-socket-monitor');
+  
   // 앱 기동 시, 기본적으로 웹 영역 1개와 모바일 영역 1개를 자동 등록하여 웰컴 화면 구성
   activeViews.value.push(createNewViewObj('web', 'https://www.google.com'));
   activeViews.value.push(createNewViewObj('mobile', 'https://www.google.com'));
@@ -534,6 +580,12 @@ onUnmounted(() => {
     resizeObserver.disconnect();
   }
   window.removeEventListener('resize', updateAllScales);
+  
+  // BroadcastChannel 정리
+  if (socketBroadcastChannel) {
+    socketBroadcastChannel.close();
+    socketBroadcastChannel = null;
+  }
 });
 
 // 패널 개수 증감 발생 시 스케일 자동 재조정

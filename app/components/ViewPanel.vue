@@ -139,6 +139,7 @@
               allowpopups 
               nodeintegration="false" 
               class="w-full h-full"
+              @ipc-message="handleIpcMessage($event)"
             ></webview>
           </div>
         </div>
@@ -180,7 +181,8 @@ const emit = defineEmits([
   'navigate',
   'preset-change',
   'dimension-input',
-  'manual-resize'
+  'manual-resize',
+  'ipc-message'
 ]);
 
 // 리사이즈 드래그 조작 상태값
@@ -234,6 +236,16 @@ const initResize = (e, direction) => {
   
   document.addEventListener('mousemove', doDrag);
   document.addEventListener('mouseup', stopDrag);
+};
+
+// 웹뷰 IPC 메시지 수신 시 channel/args를 추출하고 뷰 식별 정보를 첨부하여 부모로 전달
+const handleIpcMessage = (event) => {
+  emit('ipc-message', {
+    channel: event.channel,
+    args: event.args?.[0] || {},
+    viewId: props.view.id,
+    viewType: props.view.type
+  });
 };
 </script>
 

@@ -219,12 +219,21 @@
                     </button>
                   </div>
                 </div>
-                <!-- 메시지 본문 -->
-                <pre 
+                <!-- 메시지 본문 (JSON 파싱 성공 시 트리뷰, 실패 시 일반 텍스트) -->
+                <div 
                   v-if="!isCollapsed(socketId, msg)"
-                  class="whitespace-pre-wrap break-all text-[10px] leading-relaxed max-h-[300px] overflow-auto rounded bg-black/40 p-1.5 border border-white/5"
-                  :class="msg.direction === 'send' ? 'text-blue-100/90' : 'text-emerald-100/90'"
-                >{{ formatData(msg.data) }}</pre>
+                  class="max-h-[350px] overflow-auto rounded bg-black/40 p-2 border border-white/5"
+                >
+                  <JsonTreeView 
+                    v-if="tryParseJson(msg.data)" 
+                    :data="tryParseJson(msg.data)" 
+                  />
+                  <pre 
+                    v-else
+                    class="whitespace-pre-wrap break-all text-[10px] leading-relaxed"
+                    :class="msg.direction === 'send' ? 'text-blue-100/90' : 'text-emerald-100/90'"
+                  >{{ msg.data }}</pre>
+                </div>
                 <div 
                   v-else 
                   class="text-[10px] text-gray-500 truncate cursor-pointer hover:text-gray-300"
@@ -498,6 +507,34 @@ const formatData = (data) => {
   } catch {
     return data;
   }
+};
+
+// JSON 파싱 시도 (Socket.io의 42[...] 같은 프리셋 접두어도 함께 추출하여 파싱)
+const tryParseJson = (data) => {
+  if (typeof data !== 'string') return null;
+  const trimmed = data.trim();
+  
+  // 1. 순수 JSON 파싱 시도
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (typeof parsed === 'object' && parsed !== null) {
+      return parsed;
+    }
+  } catch {}
+  
+  // 2. Socket.io/Engine.io 접두어 처리 (예: 42[...], 42{...})
+  const sioMatch = trimmed.match(/^(\d+)([\{\[].*)$/);
+  if (sioMatch) {
+    try {
+      const parsedPayload = JSON.parse(sioMatch[2]);
+      return {
+        'EngineIO Code': sioMatch[1],
+        'Payload': parsedPayload
+      };
+    } catch {}
+  }
+  
+  return null;
 };
 
 // 선택 소켓의 메시지 로그만 초기화

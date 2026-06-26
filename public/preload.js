@@ -212,68 +212,18 @@ const injectScript = `
       console.error("[Preload] Error during window.chrome mocking:", e);
     }
 
-    // 1-4. navigator.plugins 모사 (일반 크롬 브라우저 기본 플러그인 제공)
-    try {
-      if (typeof Plugin !== 'undefined' && typeof PluginArray !== 'undefined') {
-        const mockPluginArray = Object.create(PluginArray.prototype);
-        const plugins = [];
-        const mockPlugins = [
-          { name: 'PDF Viewer', description: 'Portable Document Format', filename: 'internal-pdf-viewer' },
-          { name: 'Chrome PDF Viewer', description: 'Google Chrome PDF Viewer', filename: 'mhjfbgoeeibknnecapdemadpacomhbji' },
-          { name: 'Chromium PDF Viewer', description: 'Chromium PDF Viewer', filename: 'internal-pdf-viewer' }
-        ];
-        
-        mockPlugins.forEach((p, idx) => {
-          const plugin = Object.create(Plugin.prototype);
-          Object.defineProperties(plugin, {
-            name: { value: p.name, enumerable: true },
-            description: { value: p.description, enumerable: true },
-            filename: { value: p.filename, enumerable: true },
-            length: { value: 0, enumerable: true }
-          });
-          plugins.push(plugin);
-          Object.defineProperty(mockPluginArray, idx, { value: plugin, enumerable: true, configurable: true });
-          Object.defineProperty(mockPluginArray, p.name, { value: plugin, enumerable: true, configurable: true });
-        });
-
-        Object.defineProperties(mockPluginArray, {
-          length: { value: plugins.length, enumerable: true, configurable: true },
-          item: { 
-            value: makeNative(function(index) { return this[index]; }, 'item'), 
-            enumerable: true,
-            writable: true,
-            configurable: true
-          },
-          namedItem: { 
-            value: makeNative(function(name) { return this[name]; }, 'namedItem'), 
-            enumerable: true,
-            writable: true,
-            configurable: true
-          }
-        });
-
-        Object.defineProperty(Navigator.prototype, 'plugins', {
-          get: () => mockPluginArray,
-          configurable: true,
-          enumerable: true
-        });
-        console.log("[Preload] Successfully injected navigator.plugins mock.");
-      }
-    } catch (e) {
-      console.error("[Preload] Error during navigator.plugins mocking:", e);
-    }
-
     // 2. WebSocket 몽키 패치로 메시지 가로채기
     const OriginalWebSocket = window.WebSocket;
     if (!OriginalWebSocket) return;
     
     window.WebSocket = function(url, protocols) {
+      console.log("[Preload WS] Intercepted WebSocket creation for URL:", url);
       const ws = new OriginalWebSocket(url, protocols);
       // 고유 소켓 인스턴스 식별용 ID 생성
       const socketId = 'ws-' + Math.random().toString(36).substr(2, 9);
       
       // 소켓 연결 수립 알림 릴레이
-      window.dispatchEvent(new CustomEvent('__domi_ws_event', {
+      document.dispatchEvent(new CustomEvent('__domi_ws_event', {
         detail: {
           channel: 'socket-connected',
           args: { id: socketId, url, timestamp: Date.now() }
@@ -282,7 +232,7 @@ const injectScript = `
 
       // 메시지 수신(Receive) 감청 및 릴레이
       ws.addEventListener('message', (event) => {
-        window.dispatchEvent(new CustomEvent('__domi_ws_event', {
+        document.dispatchEvent(new CustomEvent('__domi_ws_event', {
           detail: {
             channel: 'socket-message',
             args: { id: socketId, url, direction: 'receive', data: event.data, timestamp: Date.now() }
@@ -293,7 +243,7 @@ const injectScript = `
       // 메시지 송신(Send) 감청 및 릴레이 (Prototype send 몽키 패칭)
       const originalSend = ws.send;
       ws.send = function(data) {
-        window.dispatchEvent(new CustomEvent('__domi_ws_event', {
+        document.dispatchEvent(new CustomEvent('__domi_ws_event', {
           detail: {
             channel: 'socket-message',
             args: { id: socketId, url, direction: 'send', data, timestamp: Date.now() }
@@ -304,7 +254,7 @@ const injectScript = `
 
       // 소켓 연결 종료(Close) 알림 릴레이
       ws.addEventListener('close', () => {
-        window.dispatchEvent(new CustomEvent('__domi_ws_event', {
+        document.dispatchEvent(new CustomEvent('__domi_ws_event', {
           detail: {
             channel: 'socket-closed',
             args: { id: socketId, url, timestamp: Date.now() }
@@ -329,12 +279,30 @@ const finalInjectScript = injectScript
   .replace(/__CHROME_MAJOR__/g, chromeMajor)
   .replace(/__CHROME_VERSION__/g, chromeVersion);
 
-// 메인 페이지 내부 컨텍스트에 몽키 패치 즉시 적용
-webFrame.executeJavaScript(finalInjectScript);
+// 메인 페이지 내부 컨텍스트에 몽키 패치를 동기식(script 태그 삽입)으로 즉시 적용하여
+// 비동기 실행으로 인한 WebSocket 생성 타이밍과의 레이스 컨디션 해결
+try {
+  const container = document.head || document.documentElement;
+  if (container) {
+    const script = document.createElement('script');
+    script.textContent = finalInjectScript;
+    container.appendChild(script);
+    script.remove();
+    console.log("[Preload] Successfully injected mocks via script tag.");
+  } else {
+    console.log("[Preload] document.documentElement not ready, falling back to executeJavaScript.");
+    webFrame.executeJavaScript(finalInjectScript);
+  }
+} catch (e) {
+  console.error("[Preload] Failed to inject via script tag:", e);
+  webFrame.executeJavaScript(finalInjectScript);
+}
 
 // 내부 윈도우 커스텀 이벤트를 구독하여 ipcRenderer를 통해 Electron 호스트(웹뷰 태그 부모)로 토스
-window.addEventListener("__domi_ws_event", (e) => {
+// (컨텍스트 격리 우회를 위해 window 대신 document 수준에서 수신)
+document.addEventListener("__domi_ws_event", (e) => {
   const { channel, args } = e.detail;
+  console.log("[Preload WS] Isolated World received event:", channel, args);
   // BrowserWindow 형태의 팝업 등에서는 sendToHost가 누락될 수 있으므로 체크 추가
   if (ipcRenderer && typeof ipcRenderer.sendToHost === "function") {
     ipcRenderer.sendToHost(channel, args);

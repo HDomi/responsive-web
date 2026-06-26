@@ -401,6 +401,7 @@ const truncateText = (text, maxLen) => {
 // BroadcastChannel 수신 데이터 처리 핸들러
 const handleIncomingData = (event) => {
   const { channel: ch, data } = event.data;
+  console.log("[Dashboard Broadcast] Received event:", ch, data);
   
   if (ch === 'socket-connected') {
     // 신규 소켓 연결 등록
@@ -421,13 +422,27 @@ const handleIncomingData = (event) => {
     }
   } else if (ch === 'socket-message') {
     // 소켓 메시지 기록 추가 및 카운터 갱신
-    const conn = connections.value.find(c => c.id === data.id);
-    if (conn) {
-      if (data.direction === 'send') {
-        conn.sentCount++;
-      } else {
-        conn.receivedCount++;
-      }
+    let conn = connections.value.find(c => c.id === data.id);
+    if (!conn) {
+      // socket-connected 이벤트를 놓친 경우 (예: 소켓 연결 후 대시보드를 연 경우)
+      // socket-message 수신 시점에 동적으로 연결 정보 등록
+      conn = {
+        id: data.id,
+        url: data.url,
+        viewId: data.viewId || 'unknown',
+        viewType: data.viewType || 'web',
+        status: 'open',
+        sentCount: 0,
+        receivedCount: 0,
+        connectedAt: data.timestamp || Date.now()
+      };
+      connections.value.push(conn);
+    }
+
+    if (data.direction === 'send') {
+      conn.sentCount++;
+    } else {
+      conn.receivedCount++;
     }
     
     if (!messages.value[data.id]) {

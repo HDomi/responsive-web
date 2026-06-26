@@ -144,10 +144,15 @@ const openSocketMonitor = () => {
 
 // 웹뷰에서 수신된 IPC 메시지를 BroadcastChannel로 포워딩하여 모니터 창에서 실시간 수신 가능하게 함
 const onWebviewIpcMessage = ({ channel, args, viewId, viewType }) => {
-  if (!socketBroadcastChannel) return;
+  console.log(`[Host App IPC] Received message from Webview (${viewId}):`, channel, args);
+  if (!socketBroadcastChannel) {
+    console.warn("[Host App IPC] socketBroadcastChannel is not initialized.");
+    return;
+  }
   
   // 소켓 관련 채널만 필터링하여 릴레이
   if (['socket-connected', 'socket-message', 'socket-closed'].includes(channel)) {
+    console.log("[Host App IPC] Relaying socket event to BroadcastChannel:", channel);
     socketBroadcastChannel.postMessage({
       channel,
       data: { ...args, viewId, viewType }

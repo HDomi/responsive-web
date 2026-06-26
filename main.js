@@ -152,6 +152,14 @@ function createWindow() {
     bindPopupAndCookieHandler(webContents); // Deep Linking 방식에서도 기존 팝업 및 소켓 모니터링 처리를 위해 유지
     bindCookieMutatorToSession(webContents.session, webContents);
 
+    // 웹뷰에서 호스트로 보내는 모든 IPC 메시지(sendToHost) 감지 및 로그
+    webContents.on("ipc-message", (event, channel, ...args) => {
+      console.log(
+        `[Main Process Webview IPC] WebView ID: ${webContents.id}, Channel: ${channel}, Args:`,
+        args
+      );
+    });
+
     // 웹뷰 내부의 콘솔 메시지를 메인 프로세스 터미널로 포워딩 (Electron 신규/구버전 시그니처 호환 및 undefined 방어)
     webContents.on("console-message", (e, level, message, line, sourceId) => {
       let msg = message;

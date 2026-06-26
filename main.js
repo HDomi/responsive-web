@@ -241,7 +241,24 @@ function bindPopupAndCookieHandler(contents) {
       return { action: "deny" };
     }
 
-    // 외부 URL은 기본 브라우저로 열도록 처리 (Google OAuth 포함)
+    // 소셜 로그인 관련 도메인에 대한 window.open 요청이 감지되면,
+    // 새 창(팝업)이나 외부 브라우저를 띄우지 않고 현재 웹뷰(세션) 자체의 주소를 리다이렉트시킵니다.
+    const isSocialAuth = /accounts\.google\.com|nid\.naver\.com|kauth\.kakao\.com/i.test(details.url);
+    if (isSocialAuth) {
+      console.log(
+        `[Main Process] Social auth window.open intercepted. Redirecting parent webview instead: ${details.url}`,
+      );
+      process.nextTick(() => {
+        if (!contents.isDestroyed()) {
+          contents.loadURL(details.url).catch((err) => {
+            console.error(`[Main Process] Failed to redirect webview to auth URL: ${details.url}`, err);
+          });
+        }
+      });
+      return { action: "deny" };
+    }
+
+    // 외부 URL은 기본 브라우저로 열도록 처리 (Google OAuth 포함 - 위에서 걸러지지 않은 일반 외부 URL)
     if (
       details.url &&
       details.url !== "about:blank" &&

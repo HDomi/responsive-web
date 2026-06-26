@@ -6,6 +6,8 @@ const chromeMajor = chromeVersion.split(".")[0];
 // 웹 페이지의 JS 컨텍스트(Main World)에 몽키 패치를 주입하여 격리된 컨텍스트(contextIsolation) 우회
 const injectScript = `
   (function() {
+    console.log("[Preload] Injecting navigator & chrome bypass mocks inside: " + window.location.href);
+
     // 1. 구글 로그인 차단 방지를 위한 navigator.userAgentData 모사 패치
     const isMobileUA = /iPhone|iPad|Android/i.test(navigator.userAgent);
     if (isMobileUA) {
@@ -28,18 +30,18 @@ const injectScript = `
     } else {
       const mockedUAD = {
         brands: [
-          { brand: 'Chromium', version: '${chromeMajor}' },
+          { brand: 'Chromium', version: '__CHROME_MAJOR__' },
           { brand: 'Not(A:Brand', version: '24' },
-          { brand: 'Google Chrome', version: '${chromeMajor}' }
+          { brand: 'Google Chrome', version: '__CHROME_MAJOR__' }
         ],
         mobile: false,
         platform: 'macOS',
         getHighEntropyValues: function(hints) {
           return Promise.resolve({
             brands: [
-              { brand: 'Chromium', version: '${chromeMajor}' },
+              { brand: 'Chromium', version: '__CHROME_MAJOR__' },
               { brand: 'Not(A:Brand', version: '24' },
-              { brand: 'Google Chrome', version: '${chromeMajor}' }
+              { brand: 'Google Chrome', version: '__CHROME_MAJOR__' }
             ],
             mobile: false,
             platform: 'macOS',
@@ -47,7 +49,7 @@ const injectScript = `
             architecture: 'arm',
             bitness: '64',
             model: '',
-            uaFullVersion: '${chromeVersion}'
+            uaFullVersion: '__CHROME_VERSION__'
           });
         }
       };
@@ -89,26 +91,93 @@ const injectScript = `
 
     // 1-3. window.chrome 확장 기능 모사 (Google 로그인 차단 우회 - Object.defineProperty로 견고하게 모사)
     try {
-      console.log("[Preload] Injecting window.chrome and navigator modifications inside: " + window.location.href);
-      
+      const makeNative = (fn, name) => {
+        try {
+          Object.defineProperty(fn, 'name', { value: name || fn.name, configurable: true });
+          Object.defineProperty(fn, 'toString', {
+            value: () => \`function \${name || fn.name}() { [native code] }\`,
+            configurable: true
+          });
+        } catch (e) {}
+        return fn;
+      };
+
       const chromeMock = {};
+      
+      chromeMock.app = {
+        isInstalled: false,
+        InstallState: {
+          DISABLED: 'disabled',
+          INSTALLED: 'installed',
+          NOT_INSTALLED: 'not_installed'
+        },
+        RunningState: {
+          CANNOT_RUN: 'cannot_run',
+          READY_TO_RUN: 'ready_to_run',
+          RUNNING: 'running'
+        },
+        getDetails: makeNative(function() {}, 'getDetails'),
+        getIsInstalled: makeNative(function() {}, 'getIsInstalled'),
+        installState: makeNative(function() {}, 'installState'),
+        runningState: makeNative(function() {}, 'runningState')
+      };
+
       chromeMock.runtime = {
-        connect: function() { return {}; },
-        sendMessage: function() {},
-        onConnect: { addListener: function() {}, removeListener: function() {}, hasListener: function() {} },
-        onMessage: { addListener: function() {}, removeListener: function() {}, hasListener: function() {} }
+        OnInstalledReason: {
+          CHROME_UPDATE: 'chrome_update',
+          INSTALL: 'install',
+          SHARED_MODULE_UPDATE: 'shared_module_update',
+          UPDATE: 'update'
+        },
+        OnRestartRequiredReason: {
+          APP_UPDATE: 'app_update',
+          OS_UPDATE: 'os_update',
+          PERIODIC: 'periodic'
+        },
+        PlatformArch: {
+          ARM: 'arm',
+          ARM64: 'arm64',
+          MIPS: 'mips',
+          MIPS64: 'mips64',
+          X86_32: 'x86-32',
+          X86_64: 'x86-64'
+        },
+        PlatformNaclArch: {
+          ARM: 'arm',
+          MIPS: 'mips',
+          MIPS64: 'mips64',
+          X86_32: 'x86-32',
+          X86_64: 'x86-64'
+        },
+        PlatformOs: {
+          ANDROID: 'android',
+          CROS: 'cros',
+          LINUX: 'linux',
+          MAC: 'mac',
+          OPENBSD: 'openbsd',
+          WIN: 'win'
+        },
+        RequestUpdateCheckStatus: {
+          NO_UPDATE: 'no_update',
+          THROTTLED: 'throttled',
+          UPDATE_AVAILABLE: 'update_available'
+        },
+        connect: makeNative(function() { return {}; }, 'connect'),
+        sendMessage: makeNative(function() {}, 'sendMessage'),
+        onConnect: { addListener: makeNative(function() {}, 'addListener'), removeListener: makeNative(function() {}, 'removeListener'), hasListener: makeNative(function() {}, 'hasListener') },
+        onMessage: { addListener: makeNative(function() {}, 'addListener'), removeListener: makeNative(function() {}, 'removeListener'), hasListener: makeNative(function() {}, 'hasListener') }
       };
       
-      chromeMock.csi = function() {
+      chromeMock.csi = makeNative(function() {
         return {
           startE: Date.now() - 1000,
           onloadT: Date.now(),
           pageT: 1000,
           tran: 0
         };
-      };
+      }, 'csi');
       
-      chromeMock.loadTimes = function() {
+      chromeMock.loadTimes = makeNative(function() {
         const now = Date.now();
         return {
           requestTime: (now - 1000) / 1000,
@@ -125,7 +194,7 @@ const injectScript = `
           npnNegotiatedProtocol: '',
           connectionInfo: 'unknown'
         };
-      };
+      }, 'loadTimes');
 
       // window.chrome 자체를 재정의 가능한 형태로 주입
       try {
@@ -146,14 +215,15 @@ const injectScript = `
     // 1-4. navigator.plugins 모사 (일반 크롬 브라우저 기본 플러그인 제공)
     try {
       if (typeof Plugin !== 'undefined' && typeof PluginArray !== 'undefined') {
-        const mockPluginArray = [];
+        const mockPluginArray = Object.create(PluginArray.prototype);
+        const plugins = [];
         const mockPlugins = [
           { name: 'PDF Viewer', description: 'Portable Document Format', filename: 'internal-pdf-viewer' },
           { name: 'Chrome PDF Viewer', description: 'Google Chrome PDF Viewer', filename: 'mhjfbgoeeibknnecapdemadpacomhbji' },
           { name: 'Chromium PDF Viewer', description: 'Chromium PDF Viewer', filename: 'internal-pdf-viewer' }
         ];
         
-        mockPlugins.forEach((p) => {
+        mockPlugins.forEach((p, idx) => {
           const plugin = Object.create(Plugin.prototype);
           Object.defineProperties(plugin, {
             name: { value: p.name, enumerable: true },
@@ -161,25 +231,37 @@ const injectScript = `
             filename: { value: p.filename, enumerable: true },
             length: { value: 0, enumerable: true }
           });
-          mockPluginArray.push(plugin);
-          mockPluginArray[p.name] = plugin;
+          plugins.push(plugin);
+          Object.defineProperty(mockPluginArray, idx, { value: plugin, enumerable: true, configurable: true });
+          Object.defineProperty(mockPluginArray, p.name, { value: plugin, enumerable: true, configurable: true });
         });
 
         Object.defineProperties(mockPluginArray, {
-          length: { value: mockPluginArray.length, enumerable: true },
-          item: { value: function(index) { return this[index]; }, enumerable: true },
-          namedItem: { value: function(name) { return this[name]; }, enumerable: true }
+          length: { value: plugins.length, enumerable: true, configurable: true },
+          item: { 
+            value: makeNative(function(index) { return this[index]; }, 'item'), 
+            enumerable: true,
+            writable: true,
+            configurable: true
+          },
+          namedItem: { 
+            value: makeNative(function(name) { return this[name]; }, 'namedItem'), 
+            enumerable: true,
+            writable: true,
+            configurable: true
+          }
         });
-
-        Object.setPrototypeOf(mockPluginArray, PluginArray.prototype);
 
         Object.defineProperty(Navigator.prototype, 'plugins', {
           get: () => mockPluginArray,
           configurable: true,
           enumerable: true
         });
+        console.log("[Preload] Successfully injected navigator.plugins mock.");
       }
-    } catch (e) {}
+    } catch (e) {
+      console.error("[Preload] Error during navigator.plugins mocking:", e);
+    }
 
     // 2. WebSocket 몽키 패치로 메시지 가로채기
     const OriginalWebSocket = window.WebSocket;
@@ -242,8 +324,13 @@ const injectScript = `
   })();
 `;
 
+// 스크립트 내의 치환용 텍스트를 실제 디바이스 크롬 스펙 값으로 안전하게 치환
+const finalInjectScript = injectScript
+  .replace(/__CHROME_MAJOR__/g, chromeMajor)
+  .replace(/__CHROME_VERSION__/g, chromeVersion);
+
 // 메인 페이지 내부 컨텍스트에 몽키 패치 즉시 적용
-webFrame.executeJavaScript(injectScript);
+webFrame.executeJavaScript(finalInjectScript);
 
 // 내부 윈도우 커스텀 이벤트를 구독하여 ipcRenderer를 통해 Electron 호스트(웹뷰 태그 부모)로 토스
 window.addEventListener("__domi_ws_event", (e) => {

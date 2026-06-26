@@ -6,6 +6,11 @@ export default defineNuxtConfig({
   devServer: {
     port: 5656
   },
+  nitro: {
+    output: {
+      publicDir: 'dist-nuxt'
+    }
+  },
   vue: {
     compilerOptions: {
       isCustomElement: (tag) => ['webview'].includes(tag)

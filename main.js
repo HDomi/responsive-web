@@ -1,26 +1,99 @@
-import { app, BrowserWindow, session } from "electron";
+import {
+  app,
+  BrowserWindow,
+  session,
+  shell,
+  ipcMain,
+  protocol,
+  net,
+} from "electron";
 import path from "path";
-import { fileURLToPath } from "url";
+import { fileURLToPath, pathToFileURL } from "url";
 
 // SameSite 및 Secure 쿠키 정책을 완화하여 로컬 환경 웹뷰 내의 쿠키 누락 방지
 app.commandLine.appendSwitch(
   "disable-features",
   "SameSiteByDefaultCookies,CookiesWithoutSameSiteMustBeSecure",
 );
-// 🔥 [추가] 구글 로그인 우회를 위한 blink 및 자동화 플래그 제거 스위치
 app.commandLine.appendSwitch("disable-blink-features", "AutomationControlled");
 app.commandLine.appendSwitch("excludeSwitches", "enable-automation");
+app.commandLine.appendSwitch("use-mock-keychain"); // macOS 키체인 접근 경고 및 우회 목적
+app.commandLine.appendSwitch("lang", "ko-KR"); // 브라우저 기본 언어를 한국어로 명시
+// 커스텀 app 스키마 등록 (CORS 및 Fetch API 활성화로 정적 파일 및 API 통신 충돌 방지)
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: "app",
+    privileges: { standard: true, secure: true, supportFetchAPI: true },
+  },
+]);
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 let mainWindow = null;
-const activePopups = new Set();
+
+// --- Deep Linking 관련 설정 시작 ---
+const PROTOCOL = "my-app-auth"; // 앱의 커스텀 프로토콜
+
+// 개발 환경과 배포 환경에서 커스텀 프로토콜 등록
+if (process.defaultApp) {
+  if (process.argv.length >= 2) {
+    app.setAsDefaultProtocolClient(PROTOCOL, process.execPath, [
+      path.resolve(process.argv[1]),
+    ]);
+  }
+} else {
+  app.setAsDefaultProtocolClient(PROTOCOL);
+}
+
+// macOS에서 앱이 이미 실행 중일 때 open-url 이벤트 처리
+app.on("open-url", (event, receivedUrl) => {
+  event.preventDefault();
+  handleAuthRedirect(receivedUrl);
+});
+
+// Windows/Linux에서 앱이 프로토콜로 실행될 때 처리
+app.on("second-instance", (event, commandLine, workingDirectory) => {
+  if (mainWindow) {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.focus();
+  }
+  const receivedUrl = commandLine.find((arg) =>
+    arg.startsWith(`${PROTOCOL}://`),
+  );
+  if (receivedUrl) {
+    handleAuthRedirect(receivedUrl);
+  }
+});
+
+function handleAuthRedirect(receivedUrl) {
+  console.log(`[Main Process] Received deep link URL: ${receivedUrl}`);
+  const urlObj = new URL(receivedUrl);
+  const authCode = urlObj.searchParams.get("code"); // 또는 'token' 등
+
+  if (authCode) {
+    console.log(
+      `[Main Process] Google Auth Code received: ${authCode.substring(0, 10)}...`,
+    );
+    // Nuxt 렌더러 프로세스로 인증 코드 전달
+    if (mainWindow) {
+      mainWindow.webContents.send("auth-success", authCode);
+    }
+  } else {
+    console.warn("[Main Process] Deep link received but no auth code found.");
+  }
+}
+// --- Deep Linking 관련 설정 끝 ---
 
 // 메인 어플리케이션 창 생성 함수
 function createWindow() {
   const iconPath = app.isPackaged
-    ? path.join(__dirname, ".output/public/favicon.png")
+    ? path.join(__dirname, "dist-nuxt/favicon.png")
     : path.join(__dirname, "public/favicon.png");
+
+  const mainWindowPreloadPath = app.isPackaged
+    ? path.join(__dirname, "dist-nuxt/preload.js")
+    : path.join(__dirname, "public/preload.js");
 
   mainWindow = new BrowserWindow({
     width: 1600,
@@ -32,6 +105,7 @@ function createWindow() {
       contextIsolation: true,
       webviewTag: true, // Nuxt 내에서 <webview> 태그를 사용하기 위해 필수 활성화
       webSecurity: true, // 보안 무결성 및 로그인 세션 신뢰 확보를 위해 웹 보안 활성화
+      preload: mainWindowPreloadPath, // preload 스크립트 경로 추가
     },
   });
 
@@ -41,17 +115,31 @@ function createWindow() {
     // 개발 환경일 때 메인 Electron 컨테이너의 개발자 도구 자동 실행
     mainWindow.webContents.openDevTools();
   } else {
-    mainWindow.loadFile(path.join(__dirname, ".output/public/index.html"));
+    mainWindow.loadURL("app://-/index.html"); // 커스텀 프로토콜을 통해 정적 리소스를 안전하게 절대경로 문제 없이 로딩
   }
 
-  // 렌더러 프로세스에서 출력하는 콘솔 메시지를 메인 터미널 콘솔로 포워딩
+  // 렌더러 프로세스에서 출력하는 콘솔 메시지를 메인 터미널 콘솔로 포워딩 (Electron 신규/구버전 시그니처 호환 및 undefined 방어)
   mainWindow.webContents.on(
     "console-message",
     (event, level, message, line, sourceId) => {
+      let msg = message;
+      let src = sourceId;
+      let ln = line;
+      let lvl = level;
+
+      if (level && typeof level === "object") {
+        const details = level;
+        lvl = details.level;
+        msg = details.message;
+        ln = details.line;
+        src = details.sourceId;
+      }
+
       const levels = ["DEBUG", "INFO", "WARN", "ERROR"];
-      const label = levels[level] || "LOG";
+      const label = levels[lvl] || "LOG";
+      const filename = src ? path.basename(src) : "unknown";
       console.log(
-        `[Renderer Console] [${label}] ${message} (at ${path.basename(sourceId)}:${line})`,
+        `[Renderer Console] [${label}] ${msg} (at ${filename}:${ln})`,
       );
     },
   );
@@ -59,10 +147,43 @@ function createWindow() {
   // 웹뷰가 부착(attach)되는 즉시 해당 웹뷰의 webContents에 팝업 및 쿠키 동기화 헬퍼 바인딩
   mainWindow.webContents.on("did-attach-webview", (event, webContents) => {
     console.log(
-      "[Main Process] WebView attached. Binding setWindowOpenHandler...",
+      `[Main Process] WebView attached (ID: ${webContents.id}). Binding handlers...`,
     );
-    bindPopupAndCookieHandler(webContents);
-    bindCookieMutatorToSession(webContents.session);
+    bindPopupAndCookieHandler(webContents); // Deep Linking 방식에서도 기존 팝업 및 소켓 모니터링 처리를 위해 유지
+    bindCookieMutatorToSession(webContents.session, webContents);
+
+    // 웹뷰 내부의 콘솔 메시지를 메인 프로세스 터미널로 포워딩 (Electron 신규/구버전 시그니처 호환 및 undefined 방어)
+    webContents.on("console-message", (e, level, message, line, sourceId) => {
+      let msg = message;
+      let src = sourceId;
+      let ln = line;
+      let lvl = level;
+
+      if (level && typeof level === "object") {
+        const details = level;
+        lvl = details.level;
+        msg = details.message;
+        ln = details.line;
+        src = details.sourceId;
+      }
+
+      const levels = ["DEBUG", "INFO", "WARN", "ERROR"];
+      const label = levels[lvl] || "LOG";
+      const filename = src ? path.basename(src) : "unknown";
+      console.log(
+        `[WebView ${webContents.id} Console] [${label}] ${msg} (at ${filename}:${ln})`,
+      );
+    });
+
+    // 웹뷰 내 실패한 로드 감지 및 에러 상세 출력
+    webContents.on(
+      "did-fail-load",
+      (e, errorCode, errorDescription, validatedURL, isMainFrame) => {
+        console.error(
+          `[WebView ${webContents.id} Error] Failed to load URL: ${validatedURL}. Error: ${errorDescription} (${errorCode}) [MainFrame: ${isMainFrame}]`,
+        );
+      },
+    );
   });
 
   // 로딩 실패 로그 기록 (서버 오프라인, 네트워크 유실 등)
@@ -88,18 +209,10 @@ process.on("unhandledRejection", (reason, promise) => {
   console.error("[Main Process] Unhandled Rejection:", reason);
 });
 
-// 팝업 및 쿠키 동기화 처리기 바인더 헬퍼 함수
+// 팝업 및 쿠키 동기화 처리기 바인더 헬퍼 함수 (Deep Linking 방식에서는 외부 브라우저를 사용하므로 이 함수는 더 이상 Google OAuth에 직접 관여하지 않음)
 function bindPopupAndCookieHandler(contents) {
   contents.setWindowOpenHandler((details) => {
     console.log(`[Main Process] window.open intercepted for: ${details.url}`);
-
-    // 1. 이미 열려 있는 팝업 내부에서 추가로 window.open이 호출되는 경우 허용하여 GUEST_VIEW_MANAGER_CALL 오류 방지
-    if (activePopups.has(contents.id)) {
-      console.log(
-        `[Main Process] window.open inside popup allowed for: ${details.url}`,
-      );
-      return { action: "allow" };
-    }
 
     // 소켓 모니터링 대시보드 전용 팝업 요청 (내부 URL 감지보다 먼저 확인하여 localhost 도메인 충돌 방지)
     if (details.url && details.url.includes("#socket-monitor")) {
@@ -108,7 +221,7 @@ function bindPopupAndCookieHandler(contents) {
       );
 
       const monitorIconPath = app.isPackaged
-        ? path.join(__dirname, ".output/public/favicon.png")
+        ? path.join(__dirname, "dist-nuxt/favicon.png")
         : path.join(__dirname, "public/favicon.png");
 
       const monitorWin = new BrowserWindow({
@@ -128,260 +241,89 @@ function bindPopupAndCookieHandler(contents) {
       return { action: "deny" };
     }
 
-    // 2. 내부 리다이렉션 - 새 창을 띄우지 않고 부모 웹뷰 내부에서 링크를 직접 로딩하도록 처리
-    if (details.url && details.url !== "about:blank") {
-      try {
-        const targetUrl = new URL(details.url);
-        const currentUrlStr = contents.getURL();
-        let isInternal = false;
-
-        if (currentUrlStr) {
-          const currentUrl = new URL(currentUrlStr);
-          const getRootDomain = (hostname) => {
-            const parts = hostname.split(".");
-            if (parts.length >= 2) {
-              return parts.slice(-2).join(".");
-            }
-            return hostname;
-          };
-
-          // 소셜 로그인을 개시하는 내부 API 엔드포인트 패턴 감지 (/auth/, /oauth, /google 등)
-          const isOAuthPath =
-            targetUrl.pathname.includes("/auth/") ||
-            targetUrl.pathname.includes("/oauth") ||
-            targetUrl.pathname.includes("/login/oauth") ||
-            targetUrl.pathname.includes("/signin/oauth") ||
-            targetUrl.pathname.includes("/google"); // 구글 로그인 API 매칭 추가
-
-          // 동일 도메인이더라도 OAuth 인증 경로인 경우 부모 창 이동을 막아 팝업 창으로 안전하게 분리되도록 함
-          isInternal =
-            (getRootDomain(targetUrl.hostname) ===
-              getRootDomain(currentUrl.hostname) ||
-              targetUrl.hostname === "localhost" ||
-              targetUrl.hostname === "127.0.0.1") &&
-            !isOAuthPath;
-        } else {
-          isInternal =
-            targetUrl.hostname === "localhost" ||
-            targetUrl.hostname === "127.0.0.1";
-        }
-
-        if (isInternal) {
-          console.log(
-            `[Main Process] Internal URL detected, navigating parent view: ${details.url}`,
-          );
-          setTimeout(() => {
-            if (!contents.isDestroyed()) {
-              contents.loadURL(details.url);
-            }
-          }, 0);
-          return { action: "deny" };
-        }
-      } catch (err) {
-        console.error(`[Main Process] Error parsing URL: ${details.url}`, err);
-      }
+    // 외부 URL은 기본 브라우저로 열도록 처리 (Google OAuth 포함)
+    if (
+      details.url &&
+      details.url !== "about:blank" &&
+      !details.url.startsWith(mainWindow.webContents.getURL())
+    ) {
+      console.log(
+        `[Main Process] Opening external URL in default browser: ${details.url}`,
+      );
+      shell.openExternal(details.url);
+      return { action: "deny" }; // Electron 앱 내에서는 열지 않음
     }
 
-    // 3. 외부 소셜 로그인 및 인증 팝업용 새 BrowserWindow 창 생성 및 제어
-    const parentSession = contents.session;
-
-    const iconPath = app.isPackaged
-      ? path.join(__dirname, ".output/public/favicon.png")
-      : path.join(__dirname, "public/favicon.png");
-
-    const popupWin = new BrowserWindow({
-      width: 850,
-      height: 750,
-      title: "보안 로그인",
-      icon: iconPath,
-      autoHideMenuBar: true,
-      webPreferences: {
-        nodeIntegration: false,
-        contextIsolation: true,
-        session: parentSession, // 부모 웹뷰 세션 인스턴스를 직접 복사 및 공유 상속
-        webSecurity: true, // 구글 로그인 등의 보안 브라우저 검증 통과를 위해 반드시 true 설정
-      },
-    });
-
-    // 내부의 또 다른 window.open 호출을 지원하기 위해 활성 팝업 목록에 등록
-    activePopups.add(popupWin.webContents.id);
-    popupWin.on("closed", () => {
-      activePopups.delete(popupWin.webContents.id);
-    });
-
-    // 구글 소셜 로그인 등 모바일 환경 차단 우회를 위해 데스크톱 전용 User-Agent 강제 적용
-    if (app.userAgentFallback) {
-      popupWin.webContents.setUserAgent(app.userAgentFallback);
-    }
-
-    // 팝업 주소 로드 시 명시적으로 최신 데스크톱 User-Agent를 넘겨 첫 HTTP 요청의 신뢰성 보장
-    popupWin.loadURL(details.url, { userAgent: app.userAgentFallback });
-
-    // 로그인 완료 감지 및 성공 시 쿠키 공유를 위한 내비게이션 리디렉션 감시 리스너
-    const handleNavigation = async (targetUrl) => {
-      console.log(`[Main Process] Popup navigating to: ${targetUrl}`);
-
-      try {
-        const parsedUrl = new URL(targetUrl);
-        const parentUrlStr = contents.getURL();
-        let isBackToApp = false;
-
-        if (parentUrlStr) {
-          const parentUrl = new URL(parentUrlStr);
-          const getRootDomain = (hostname) => {
-            const parts = hostname.split(".");
-            if (parts.length >= 2) {
-              return parts.slice(-2).join(".");
-            }
-            return hostname;
-          };
-
-          const targetRoot = getRootDomain(parsedUrl.hostname);
-          const parentRoot = getRootDomain(parentUrl.hostname);
-
-          // 소셜 로그인 진행 중인 외부 OAuth 제공자 도메인 정의
-          const isOAuthProvider =
-            parsedUrl.hostname.includes("google.com") ||
-            parsedUrl.hostname.includes("googleusercontent.com") ||
-            parsedUrl.hostname.includes("gstatic.com") ||
-            parsedUrl.hostname.includes("facebook.com") ||
-            parsedUrl.hostname.includes("apple.com") ||
-            parsedUrl.hostname.includes("github.com") ||
-            parsedUrl.hostname.includes("kakao.com") ||
-            parsedUrl.hostname.includes("naver.com");
-
-          isBackToApp =
-            (targetRoot === parentRoot ||
-              parsedUrl.hostname === "localhost" ||
-              parsedUrl.hostname === "127.0.0.1") &&
-            !isOAuthProvider;
-        }
-
-        // 팝업창 주소가 최종적으로 부모 웹뷰의 도메인 영역으로 안전하게 리다이렉션되어 복귀했는지 확인
-        if (isBackToApp) {
-          console.log(
-            `[Main Process] OAuth Flow successfully completed. Final redirect target: ${targetUrl}`,
-          );
-
-          if (!popupWin.isDestroyed()) {
-            const popupSession = popupWin.webContents.session;
-            const parentSession = contents.session;
-
-            // 1. 팝업 세션 쿠키를 디스크에 강제 저장
-            await popupSession.cookies.flushStore();
-
-            // 2. 팝업 세션에서 모든 생성 쿠키 추출
-            const cookies = await popupSession.cookies.get({});
-            console.log(
-              `[Main Process] Extracting ${cookies.length} cookies from OAuth popup session...`,
-            );
-
-            // 3. 추출된 모든 인증 쿠키를 부모 웹뷰 세션으로 수동 동기화 복사
-            for (const cookie of cookies) {
-              const protocol = cookie.secure ? "https:" : "http:";
-              const domainClean = cookie.domain.startsWith(".")
-                ? cookie.domain.slice(1)
-                : cookie.domain;
-              const cookieUrl = `${protocol}//${domainClean}${cookie.path}`;
-
-              const cookieDetails = {
-                url: cookieUrl,
-                name: cookie.name,
-                value: cookie.value,
-                domain: cookie.domain,
-                path: cookie.path,
-                secure: cookie.secure,
-                httpOnly: cookie.httpOnly,
-                expirationDate: cookie.expirationDate,
-                sameSite: cookie.sameSite,
-              };
-
-              try {
-                await parentSession.cookies.set(cookieDetails);
-                console.log(
-                  `  [Cookie Sync] Successfully copied cookie: ${cookie.name} for domain ${cookie.domain}`,
-                );
-              } catch (err) {
-                console.error(
-                  `  [Cookie Sync] [ERROR] Failed to copy cookie: ${cookie.name}`,
-                  err,
-                );
-              }
-            }
-
-            // 4. 부모 세션 쿠키 강제 동기화 및 쓰기 실행
-            await parentSession.cookies.flushStore();
-
-            // 5. 부모 세션 내 정상 반영 여부 최종 검증 출력
-            const verifiedCookies = await parentSession.cookies.get({
-              url: targetUrl,
-            });
-            console.log(
-              `[Main Process] Parent Session Verified Cookies for ${parsedUrl.hostname}:`,
-            );
-            verifiedCookies.forEach((c) => {
-              console.log(
-                `  Verified Cookie: name=${c.name}, value=${c.value.substring(0, Math.min(10, c.value.length))}..., domain=${c.domain}`,
-              );
-            });
-          }
-
-          // 동기화 완료 후 팝업창을 스스로 닫고, 부모 웹뷰를 로그인 최종 완료 페이지로 리다이렉트
-          setTimeout(() => {
-            if (!contents.isDestroyed()) {
-              contents.loadURL(targetUrl);
-            }
-            if (!popupWin.isDestroyed()) {
-              popupWin.destroy();
-            }
-          }, 800);
-        }
-      } catch (err) {
-        console.error("[Main Process] Error in handleNavigation:", err);
-      }
-    };
-
-    popupWin.webContents.on("will-navigate", (e, targetUrl) => {
-      handleNavigation(targetUrl);
-    });
-
-    popupWin.webContents.on("did-redirect-navigation", (e, targetUrl) => {
-      handleNavigation(targetUrl);
-    });
-
-    popupWin.webContents.on("did-navigate", (e, targetUrl) => {
-      handleNavigation(targetUrl);
-    });
-
+    // 그 외의 팝업은 기본적으로 차단
     return { action: "deny" };
   });
 }
 
-const activeSessions = new Set();
-
 // 세션 단위 SameSite/Secure 쿠키 규약 우회 및 동메인 공유 강제 설정 + 디버그 리스너 바인딩
-function bindCookieMutatorToSession(sess) {
+function bindCookieMutatorToSession(sess, webContents) {
   if (!sess) return;
 
   console.log(
     `[Main Process] [Session Init] Binding cookie mutator and debugger to session: ${sess.getStoragePath() || "memory-session"}`,
   );
 
-  // Electron UA 감지를 우회하기 위해 개별 격리 세션 전용 기본 User-Agent 설정
-  if (app.userAgentFallback) {
-    sess.setUserAgent(app.userAgentFallback);
-  }
+  // Electron UA 감지를 우회하기 위해 개별 격리 세션 전용 기본 User-Agent 설정 (webContents의 커스텀 UA를 최우선 상속)
+  const electronChromiumVersion = process.versions.chrome; // Electron이 사용하는 Chromium 버전
+  const chromeMajorVersion = electronChromiumVersion.split(".")[0];
+  const targetUA = `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeMajorVersion}.0.0.0 Safari/537.36`;
 
-  // 구글 로그인 보안 블락 이중 우회: accounts.google.com으로 전송되는 모든 HTTP 요청 헤더의 User-Agent를 강제로 데스크톱 크롬으로 변조
+  sess.setUserAgent(targetUA);
   sess.webRequest.onBeforeSendHeaders(
-    { urls: ["https://accounts.google.com/*"] },
+    { urls: ["<all_urls>"] },
     (details, callback) => {
-      details.requestHeaders["User-Agent"] = app.userAgentFallback;
+      details.requestHeaders["User-Agent"] = targetUA;
+      details.requestHeaders["Accept-Language"] =
+        "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7";
       callback({ requestHeaders: details.requestHeaders });
     },
   );
+  // 구글 로그인 및 일반 사이트 보안 블락 우회: 모든 외부 요청 헤더에서 Electron Client Hints를 지우고 Chrome으로 변조
+  sess.webRequest.onBeforeSendHeaders(
+    { urls: ["http://*/*", "https://*/*"] },
+    (details, callback) => {
+      const headers = details.requestHeaders;
 
-  // SameSite/Secure 규약 우회 헤더 인터셉터
+      // 1. 기존 User-Agent 확인 (대소문자 무관 검색)
+      const uaKey =
+        Object.keys(headers).find((k) => k.toLowerCase() === "user-agent") ||
+        "User-Agent";
+      let userAgent = headers[uaKey] || targetUA; // 기본 UA를 targetUA로 설정
+
+      // 만약 User-Agent에 Electron 흔적이 있으면 제거
+      if (userAgent.includes("Electron/")) {
+        userAgent = userAgent.replace(/\s*Electron\/[^\s]+/i, "");
+      }
+      headers[uaKey] = userAgent;
+
+      // 2. Electron을 드러내는 기존 Client Hints 삭제
+      for (const key of Object.keys(headers)) {
+        if (key.toLowerCase().startsWith("sec-ch-ua")) {
+          delete headers[key];
+        }
+      }
+
+      // 3. User-Agent에 맞춘 Client Hints 주입
+      const chromeMajorVersion = electronChromiumVersion.split(".")[0];
+
+      headers["Sec-Ch-Ua"] =
+        `"Chromium";v="${chromeMajorVersion}", "Not(A:Brand";v="24", "Google Chrome";v="${chromeMajorVersion}"`;
+      headers["Sec-Ch-Ua-Mobile"] = "?0";
+      headers["Sec-Ch-Ua-Platform"] = '"Windows"'; // 또는 '"macOS"', '"Linux"' 등 운영체제에 맞게
+      headers["Sec-Ch-Ua-Platform-Version"] = '"10.0.0"'; // 실제 OS 버전에 맞게 조정
+      headers["Sec-Ch-Ua-Model"] = '""';
+      headers["Sec-Ch-Ua-Arch"] = '"x86"'; // 또는 '"arm"' 등 아키텍처에 맞게
+      headers["Sec-Ch-Ua-Bitness"] = '"64"';
+
+      callback({ requestHeaders: headers });
+    },
+  );
+
+  // SameSite/Secure 규약 우회 헤더 인터셉터 (오직 로컬 개발 환경의 편의를 위해서만 작동 제한)
   sess.webRequest.onHeadersReceived((details, callback) => {
     let responseHeaders = details.responseHeaders;
     const setCookieKey = Object.keys(responseHeaders).find(
@@ -396,28 +338,31 @@ function bindCookieMutatorToSession(sess) {
 
         // 외부 소셜 로그인 사이트 및 구글 자체 서비스 도메인은 인프라 우회 대상에서 강제 배제
         const isOAuthOrSystem =
-          parsedUrl.hostname.includes("google.com") ||
-          parsedUrl.hostname.includes("googleusercontent.com") ||
-          parsedUrl.hostname.includes("gstatic.com") ||
-          parsedUrl.hostname.includes("facebook.com") ||
-          parsedUrl.hostname.includes("apple.com") ||
-          parsedUrl.hostname.includes("github.com") ||
-          parsedUrl.hostname.includes("kakao.com") ||
-          parsedUrl.hostname.includes("naver.com");
+          /google\.[a-z]+|youtube\.[a-z]+|youtube-nocookie\.[a-z]+|googleusercontent\.com|gstatic\.com|googleauth\.com|googleapis\.com|facebook\.com|apple\.com|github\.com|kakao\.com|naver\.com/i.test(
+            parsedUrl.hostname,
+          );
 
         isAppDomain = !isOAuthOrSystem;
       } catch (err) {
         console.error("[Cookie Mutator] Error parsing URL:", details.url, err);
       }
 
-      // 소셜 로그인 외부 연동 영역이 아닌 경우에만 SameSite 및 Secure 규약 우회 완화 변조 진행
-      if (!isAppDomain || !parsedUrl) {
+      // 쿠키 보안 정책 완화는 오직 로컬 환경 (http 또는 localhost / 127.0.0.1) 내에서만 수행
+      // HTTPS 기반의 실 배포 서버(예: https://dev.lumiteach.ai)는 원래 쿠키 설정을 온전히 보존
+      const isLocalHost =
+        parsedUrl &&
+        (parsedUrl.hostname === "localhost" ||
+          parsedUrl.hostname === "127.0.0.1");
+      const isLocalHttp = parsedUrl && parsedUrl.protocol === "http:";
+      const isLocalContext = isLocalHost || isLocalHttp;
+
+      if (!isAppDomain || !parsedUrl || !isLocalContext) {
         callback({ cancel: false, responseHeaders });
         return;
       }
 
       console.log(
-        `[Main Process] [Cookie Mutator] Intercepted Set-Cookie for App URL: ${details.url}`,
+        `[Main Process] [Cookie Mutator] Intercepted Set-Cookie for Local App URL: ${details.url}`,
       );
       responseHeaders[setCookieKey] = responseHeaders[setCookieKey].map(
         (cookieStr) => {
@@ -466,7 +411,7 @@ app.on("web-contents-created", (event, contents) => {
 
     // 소켓 모니터링용 preload 스크립트 강제 자동 장착
     const preloadPath = app.isPackaged
-      ? path.join(__dirname, ".output/public/preload.js")
+      ? path.join(__dirname, "dist-nuxt/preload.js")
       : path.join(__dirname, "public/preload.js");
     webPreferences.preload = preloadPath;
 
@@ -477,20 +422,43 @@ app.on("web-contents-created", (event, contents) => {
 
   // 생성 완료 직후 팝업 제어기 및 세션 정책 핸들러 연결
   bindPopupAndCookieHandler(contents);
-  bindCookieMutatorToSession(contents.session);
+  bindCookieMutatorToSession(contents.session, contents);
 });
 
-// 전역 기본 User-Agent 설정
-app.userAgentFallback =
-  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
+// 전역 기본 User-Agent 설정 (Deep Linking 방식에서는 이 설정이 Google OAuth에 직접적인 영향을 주지 않음)
+app.userAgentFallback = `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${process.versions.chrome}.0.0.0 Safari/537.36`;
 
 app.whenReady().then(() => {
-  // 🔥 확실한 전역 User-Agent 주입 (구글 계정 탐지용)
+  // 'app://' 프로토콜로 빌드된 Nuxt 정적 자원을 서빙
   const targetUA =
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
   app.userAgentFallback = targetUA;
+
+  // 기본 세션에 UA와 언어를 명시적으로 고정
   session.defaultSession.setUserAgent(targetUA);
+  protocol.handle("app", (request) => {
+    const url = new URL(request.url);
+    let pathname = decodeURIComponent(url.pathname);
+
+    if (pathname === "/" || pathname === "") {
+      pathname = "/index.html";
+    }
+
+    // 패키징되었을 때 resources/app/dist-nuxt 경로 참조
+    const baseDir = app.isPackaged
+      ? path.join(__dirname, "dist-nuxt")
+      : path.join(__dirname, "public"); // 개발 모드는 localhost를 보므로 사실상 무의미하지만 안전핀으로 제공
+
+    const resolvedPath = path.join(baseDir, pathname);
+    return net.fetch(pathToFileURL(resolvedPath).toString());
+  });
   createWindow();
+
+  // IPC 통신 리스너 설정 (Nuxt 렌더러에서 로그인 요청 시)
+  ipcMain.on("start-google-login", (event) => {
+    const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=557189097262-ktb8jgpqlpmkqa9dt51p9aae71a979sl.apps.googleusercontent.com&redirect_uri=${PROTOCOL}://callback&response_type=code&scope=email profile openid`;
+    shell.openExternal(authUrl);
+  });
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {

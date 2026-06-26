@@ -173,8 +173,8 @@ const createNewViewObj = (type, initialUrl = 'https://www.google.com') => {
     canGoBack: false,
     canGoForward: false,
     userAgent: isWeb 
-      ? 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
-      : 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/122.0.0.0 Mobile/15E148 Safari/604.1',
+      ? 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.7778.271 Safari/537.36'
+      : 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/148.0.7778.271 Mobile/15E148 Safari/604.1',
     // 세션 파티션 격리: 고정된 ID 기반으로 핫 리로드 및 앱 재구동 시에도 완벽한 세션 유지
     partition: `persist:session-${id}`,
     // 사용자가 직접 드래그해서 지정한 카드 물리적 크기 값 (초기에는 undefined)
@@ -333,11 +333,6 @@ const navigate = (id) => {
   const url = formatUrl(view.inputUrl);
   view.url = url;
   view.inputUrl = url;
-  
-  const webview = document.getElementById(`webview-${id}`);
-  if (webview) {
-    webview.src = url;
-  }
 };
 
 // 글로벌 주소를 전체 활성 패널에 일괄 적용 동기화
@@ -348,10 +343,6 @@ const syncAllViews = () => {
   activeViews.value.forEach(view => {
     view.inputUrl = url;
     view.url = url;
-    const webview = document.getElementById(`webview-${view.id}`);
-    if (webview) {
-      webview.src = url;
-    }
   });
 };
 
@@ -537,6 +528,8 @@ const bindWebviewEvents = (id) => {
 
 let resizeObserver = null;
 
+let unsubscribeAuth = null;
+
 onMounted(() => {
   // 해시 라우팅으로 소켓 모니터 모드 진입 여부 판별
   isSocketMonitorMode.value = window.location.hash === '#socket-monitor';
@@ -544,6 +537,19 @@ onMounted(() => {
   // 소켓 모니터 모드에서는 메인 브라우저 초기화를 건너뜀 (대시보드 컴포넌트가 자체 초기화 수행)
   if (isSocketMonitorMode.value) return;
   
+  // 메인 프로세스(Deep Link 수신)로부터 구글 인증 코드 이벤트 리스닝 후 모든 웹뷰로 중계
+  if (window.electronAPI) {
+    unsubscribeAuth = window.electronAPI.receive('auth-success', (authCode) => {
+      console.log('[Nuxt Renderer] Google Auth Code received, forwarding to all webviews:', authCode);
+      activeViews.value.forEach(view => {
+        const webview = document.getElementById(`webview-${view.id}`);
+        if (webview) {
+          webview.send('auth-success', authCode);
+        }
+      });
+    });
+  }
+
   // 메인 브라우저 모드에서만 BroadcastChannel 릴레이어 생성 (소켓 데이터를 모니터 팝업으로 전송)
   socketBroadcastChannel = new BroadcastChannel('domi-socket-monitor');
   
@@ -576,6 +582,9 @@ onMounted(() => {
 });
 
 onUnmounted(() => {
+  if (unsubscribeAuth) {
+    unsubscribeAuth();
+  }
   if (resizeObserver) {
     resizeObserver.disconnect();
   }
